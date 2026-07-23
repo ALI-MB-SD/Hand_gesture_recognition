@@ -1,0 +1,9 @@
+{
+	email a1382mb@gmail.com
+
+	acme_dns cloudflare {env.CF_API_TOKEN}
+}
+
+api.alimb.ir {
+	reverse_proxy 127.0.0.1:8000
+}

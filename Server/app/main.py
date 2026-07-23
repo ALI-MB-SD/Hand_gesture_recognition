@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Depends, HTTPException, Query, status
+from fastapi import FastAPI, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
@@ -11,14 +11,17 @@ from app.models import (
     GestureDefinition,
     Action,
     Device,
+    DeviceStatusEvent,
+    DeviceTelemetryEvent,
     GestureActionMap,
     ActionDeviceMap,
     CommandEvent,
+    BrokerStatusEvent
 )
 from app.schemas.user import UserCreate, UserLogin, UserOut, TokenOut
 from app.schemas.gesture import GestureCreate, GestureOut
 from app.schemas.action import ActionCreate, ActionOut
-from app.schemas.device import DeviceCreate, DeviceOut, DeviceProvisionOut, PendingCommandOut, AckPayload
+from app.schemas.device import DeviceCreate, DeviceOut, DeviceProvisionOut, DeviceStatusEventOut, DeviceTelemetryEventOut, AckPayload
 from app.schemas.mapping import (
     GestureActionMapCreate,
     GestureActionMapOut,
@@ -26,8 +29,10 @@ from app.schemas.mapping import (
     ActionDeviceMapOut,
 )
 from app.schemas.command import CommandIngest, CommandOut
+from app.schemas.broker import BrokerStatusOut, BrokerStatusEventOut
+
 from app.services.command_monitor import process_command_timeouts
-from app.services.mqtt_service import publish_command
+from app.services.mqtt_service import publish_command, start_mqtt, stop_mqtt, get_broker_status
 
 from contextlib import asynccontextmanager
 
@@ -47,11 +52,37 @@ async def timeout_worker():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    start_mqtt()
     task = asyncio.create_task(timeout_worker())
-    yield
-    task.cancel()
+    
+    try:
+        yield
+    finally:    
+        task.cancel()
+    
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass        
+        stop_mqtt()
     
 app = FastAPI(title="Gesture Routing Server",lifespan=lifespan)
+
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://id-preview--0a07e0f0-5a7c-48f1-821b-ae48740b324a.lovable.app",
+        "https://api.alimb.ir:8443",
+        "https://alimb.ir",
+        "http://localhost:3000",
+        "http://127.0.0.1:8000",
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "Accept", "X-Requested-With"],
+)
 
 
 def norm_label(text: str) -> str:
@@ -248,7 +279,7 @@ def create_device(
         existing.name = payload.name
         existing.device_type = payload.device_type
         existing.enabled = payload.enabled
-        existing.last_seen = datetime.utcnow()
+        existing.created_at = datetime.utcnow()
         db.commit()
         db.refresh(existing)
         return existing
@@ -260,7 +291,7 @@ def create_device(
         device_type=payload.device_type,
         enabled=payload.enabled,
         api_key=api_key,
-        last_seen=datetime.utcnow(),
+        created_at=datetime.utcnow(),
     )
     db.add(device)
     db.commit()
@@ -274,6 +305,21 @@ def list_devices(
     current_user: User = Depends(get_current_user),
 ):
     return db.query(Device).order_by(Device.id.asc()).all()
+
+
+@app.get("/devices/status-events", response_model=list[DeviceStatusEventOut])
+def list_device_status_events(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return db.query(DeviceStatusEvent).order_by(DeviceStatusEvent.id.desc()).all()
+
+@app.get("/devices/telemetry-events", response_model=list[DeviceTelemetryEventOut])
+def list_device_telemetry_events(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return db.query(DeviceTelemetryEvent).order_by(DeviceTelemetryEvent.id.desc()).all()
 
 
 @app.post("/gesture-action-maps", response_model=GestureActionMapOut)
@@ -415,6 +461,18 @@ def ingest_command(
             "reason": "duplicate replay or unique constraint violation",
         }
 
+    publish_command(
+        device_id=device.device_id,
+        event_id=command.event_id,
+        action_code=action.action_code
+    )
+    
+    command.status = "sent"
+    command.sent_at = datetime.now(timezone.utc)
+    
+    db.commit()
+    db.refresh(command)
+    
     return {
         "success": True,
         "duplicate": False,
@@ -426,7 +484,7 @@ def ingest_command(
         "status": command.status,
     }
 
-@app.get("/commands/pending", response_model=list[PendingCommandOut])
+'''@app.get("/commands/pending", response_model=list[PendingCommandOut])
 def get_pending_commands(
     db: Session = Depends(get_db),
     current_device: Device = Depends(get_current_device),
@@ -459,7 +517,7 @@ def get_pending_commands(
         cmd.sent_at = datetime.now(timezone.utc)
     
     db.commit()
-    return result
+    return result '''
 
 @app.get("/commands", response_model=list[CommandOut])
 def get_all_commands(
@@ -508,16 +566,14 @@ def acknowledge_command(
         "event_id": payload.event_id,
         "status": "acked"
     }
-    
-@app.post("/mqtt-test")
-def mqtt_test():
 
-    publish_command(
-        "esp32_light_1",
-        {
-            "action": "LIGHT_ON",
-            "event_id": "test123"
-        }
-    )
+@app.get("/broker/status", response_model=BrokerStatusOut)
+def broker_status():
+    return get_broker_status()
 
-    return {"success": True}
+@app.get("/broker/status-events", response_model=list[BrokerStatusEventOut])
+def list_broker_status_events(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return db.query(BrokerStatusEvent).order_by(BrokerStatusEvent.id.desc()).all()   

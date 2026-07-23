@@ -1,16 +1,15 @@
 from datetime import datetime, timezone, timedelta
 from sqlalchemy.orm import Session
-from app.models.command import CommandEvent
 
-PENDING_TIMEOUT_SECONDS = 10
-SENT_TIMEOUT_SECONDS = 10
+from app.models.command import CommandEvent
+from app.settings import settings
 
 def process_command_timeouts(db: Session):
 
     now = datetime.now(timezone.utc)
-    pending_cutoff = (now - timedelta(seconds=PENDING_TIMEOUT_SECONDS))
-
-    sent_cutoff = ( now - timedelta(seconds=SENT_TIMEOUT_SECONDS))
+    
+    pending_cutoff = (now - timedelta(seconds=settings.PENDING_TIMEOUT_SECONDS))
+    sent_cutoff = ( now - timedelta(seconds=settings.SENT_TIMEOUT_SECONDS))
 
     pending_commands = (
         db.query(CommandEvent)
